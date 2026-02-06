@@ -143,7 +143,10 @@ app.post('/upload-batch', async (req, res) => {
         const { fileName, fileData } = fileObj;
         if (!fileName || !fileData) continue;
 
-        const buffer = Buffer.from(fileData, 'base64');
+       const base64Data = fileData.includes(',') ? fileData.split(',')[1] : fileData;
+        const buffer = Buffer.from(base64Data, 'base64');
+        console.log(`Processing ${fileName}: input length ${fileData.length}, buffer size ${buffer.length}`);
+        
         const { Readable } = require('stream');
         const stream = new Readable();
         stream.push(buffer);
@@ -214,3 +217,4 @@ app.post('/upload-batch', async (req, res) => {
 app.listen(PORT, () => {
   console.log(`SupaGEEK STL Upload API running on port ${PORT}`);
 });
+
