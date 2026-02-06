@@ -23,20 +23,49 @@ app.use(cors({
 app.use(bodyParser.json({ limit: '50mb' }));
 app.use(bodyParser.urlencoded({ limit: '50mb', extended: true }));
 
-// Google Drive setup
+// Google OAuth setup
 const FOLDER_ID = process.env.GOOGLE_DRIVE_FOLDER_ID;
-const credentials = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_KEY || '{}');
+const OAUTH_CLIENT_ID = process.env.GOOGLE_OAUTH_CLIENT_ID;
+const OAUTH_CLIENT_SECRET = process.env.GOOGLE_OAUTH_CLIENT_SECRET;
+const OAUTH_REDIRECT_URI = process.env.GOOGLE_OAUTH_REDIRECT_URI;
+const OAUTH_REFRESH_TOKEN = process.env.GOOGLE_OAUTH_REFRESH_TOKEN;
 
-const auth = new google.auth.GoogleAuth({
-  credentials,
-  scopes: ['https://www.googleapis.com/auth/drive.file'],
-});
+const oauth2Client = new google.auth.OAuth2(
+  OAUTH_CLIENT_ID,
+  OAUTH_CLIENT_SECRET,
+  OAUTH_REDIRECT_URI
+);
 
-const drive = google.drive({ version: 'v3', auth });
+if (OAUTH_REFRESH_TOKEN) {
+  oauth2Client.setCredentials({ refresh_token: OAUTH_REFRESH_TOKEN });
+}
+
+const drive = google.drive({ version: 'v3', auth: oauth2Client });
 
 // Health check
 app.get('/', (req, res) => {
   res.json({ status: 'ok', service: 'SupaGEEK STL Upload API' });
+});
+
+// OAuth authorization routes
+app.get('/auth', (req, res) => {
+  const scopes = ['https://www.googleapis.com/auth/drive.file'];
+  const url = oauth2Client.generateAuthUrl({
+    access_type: 'offline',
+    prompt: 'consent',
+    scope: scopes,
+  });
+  res.redirect(url);
+});
+
+app.get('/oauth2callback', async (req, res) => {
+  try {
+    const code = req.query.code;
+    const { tokens } = await oauth2Client.getToken(code);
+    res.send(`<h1>Authorization Successful!</h1><p>Refresh token (copy and save to Railway GOOGLE_OAUTH_REFRESH_TOKEN):</p><code>${tokens.refresh_token}</code>`);
+  } catch (e) {
+    res.status(500).send(`Auth failed: ${e.message}`);
+  }
 });
 
 // Upload STL file to Google Drive
@@ -208,9 +237,7 @@ app.post('/upload-batch', async (req, res) => {
     res.status(500).json({ error: error.message || 'Batch upload failed' });
   }
 });
+
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Server running on port ${PORT}`);
 });
-
-
-
