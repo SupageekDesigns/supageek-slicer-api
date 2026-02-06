@@ -208,5 +208,9 @@ app.post('/upload-batch', async (req, res) => {
     res.status(500).json({ error: error.message || 'Batch upload failed' });
   }
 });
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`Server running on port ${PORT}`);
+});
+
 
 
