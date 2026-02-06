@@ -162,9 +162,28 @@ app.post('/upload-batch', async (req, res) => {
     const date = new Date();
     const dateStr = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
     const timeStr = `${String(date.getHours()).padStart(2, '0')}${String(date.getMinutes()).padStart(2, '0')}`;
-    const prefix = `${dateStr}_${timeStr}_${(customerName || 'Unknown').replace(/[^a-zA-Z0-9]/g, '_')}`;
+    const folderName = `${dateStr}_${timeStr}_${(customerName || 'Unknown').replace(/[^a-zA-Z0-9]/g, '_')}`;
+
+    // Create folder for this batch
+    let uploadFolderId = FOLDER_ID;
+    try {
+      const folderMetadata = {
+        name: folderName,
+        mimeType: 'application/vnd.google-apps.folder',
+        parents: [FOLDER_ID],
+      };
+      const folder = await drive.files.create({
+        resource: folderMetadata,
+        fields: 'id',
+      });
+      uploadFolderId = folder.data.id;
+      console.log(`Created folder: ${folderName} (${uploadFolderId})`);
+    } catch (folderErr) {
+      console.error('Folder creation error:', folderErr);
+    }
 
     for (const fileObj of files) {
+
       try {
         const { fileName, fileData } = fileObj;
         if (!fileName || !fileData) continue;
@@ -178,11 +197,10 @@ app.post('/upload-batch', async (req, res) => {
         const stream = Readable.from(buffer);
 
         // Upload directly to the shared folder with prefixed filename
-        const fileMetadata = {
-          name: `${prefix}_${fileName}`,
-          parents: [FOLDER_ID],
-        };
-
+      const fileMetadata = {
+  name: fileName,
+  parents: [uploadFolderId],
+};
         const media = {
           mimeType: 'application/octet-stream',
           body: stream,
@@ -241,3 +259,4 @@ app.post('/upload-batch', async (req, res) => {
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Server running on port ${PORT}`);
 });
+
