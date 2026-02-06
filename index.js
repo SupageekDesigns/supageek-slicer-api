@@ -6,6 +6,14 @@ const bodyParser = require('body-parser');
 const app = express();
 const PORT = process.env.PORT || 3001;
 
+// Handle preflight requests
+app.options('*', (req, res) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  res.sendStatus(200);
+});
+
 // Middleware
 app.use(cors({
   origin: '*',
@@ -200,4 +208,5 @@ app.post('/upload-batch', async (req, res) => {
     res.status(500).json({ error: error.message || 'Batch upload failed' });
   }
 });
+
 
