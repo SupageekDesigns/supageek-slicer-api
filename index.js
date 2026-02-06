@@ -259,4 +259,29 @@ app.post('/upload-batch', async (req, res) => {
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Server running on port ${PORT}`);
 });
+// Delete folder and all files (for payment failure cleanup)
+app.delete('/cleanup/:folderId', async (req, res) => {
+  try {
+    const { folderId } = req.params;
+    
+    if (!folderId) {
+      return res.status(400).json({ error: 'Missing folderId' });
+    }
+
+    // Delete the folder (this also deletes all files inside it)
+    await drive.files.delete({
+      fileId: folderId,
+    });
+
+    res.json({
+      success: true,
+      message: `Folder ${folderId} deleted`,
+    });
+
+  } catch (error) {
+    console.error('Cleanup error:', error);
+    res.status(500).json({ error: error.message || 'Cleanup failed' });
+  }
+});
+
 
