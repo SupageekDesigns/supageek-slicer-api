@@ -117,44 +117,29 @@ app.post('/upload-batch', async (req, res) => {
 
     const results = [];
 
+    // Create timestamp prefix for filenames
     const date = new Date();
     const dateStr = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
     const timeStr = `${String(date.getHours()).padStart(2, '0')}${String(date.getMinutes()).padStart(2, '0')}`;
-    const folderName = `${dateStr}_${timeStr}_${customerName || 'Unknown'}`.replace(/[^a-zA-Z0-9_@.-]/g, '_');
-
-    let customerFolderId = FOLDER_ID;
-    try {
-      const folderMetadata = {
-        name: folderName,
-        mimeType: 'application/vnd.google-apps.folder',
-        parents: [FOLDER_ID],
-      };
-      const folder = await drive.files.create({
-        resource: folderMetadata,
-        fields: 'id',
-      });
-      customerFolderId = folder.data.id;
-    } catch (folderErr) {
-      console.error('Folder creation error:', folderErr);
-    }
+    const prefix = `${dateStr}_${timeStr}_${(customerName || 'Unknown').replace(/[^a-zA-Z0-9]/g, '_')}`;
 
     for (const fileObj of files) {
       try {
         const { fileName, fileData } = fileObj;
         if (!fileName || !fileData) continue;
 
-       const base64Data = fileData.includes(',') ? fileData.split(',')[1] : fileData;
+        // Strip data URL prefix if present
+        const base64Data = fileData.includes(',') ? fileData.split(',')[1] : fileData;
         const buffer = Buffer.from(base64Data, 'base64');
         console.log(`Processing ${fileName}: input length ${fileData.length}, buffer size ${buffer.length}`);
         
         const { Readable } = require('stream');
-        const stream = new Readable();
-        stream.push(buffer);
-        stream.push(null);
+        const stream = Readable.from(buffer);
 
+        // Upload directly to the shared folder with prefixed filename
         const fileMetadata = {
-          name: fileName,
-          parents: [customerFolderId],
+          name: `${prefix}_${fileName}`,
+          parents: [FOLDER_ID],
         };
 
         const media = {
@@ -165,8 +150,10 @@ app.post('/upload-batch', async (req, res) => {
         const file = await drive.files.create({
           resource: fileMetadata,
           media: media,
-          fields: 'id, name',
+          fields: 'id, name, webViewLink',
         });
+
+        console.log(`File created: ${file.data.id}`);
 
         await drive.permissions.create({
           fileId: file.data.id,
@@ -185,10 +172,11 @@ app.post('/upload-batch', async (req, res) => {
           success: true,
           fileName: file.data.name,
           viewLink: fileInfo.data.webViewLink,
+          downloadLink: fileInfo.data.webContentLink,
         });
 
       } catch (fileErr) {
-        console.error('File upload error:', fileErr);
+        console.error('File upload error:', fileErr.message);
         results.push({
           success: false,
           fileName: fileObj.fileName,
@@ -197,14 +185,9 @@ app.post('/upload-batch', async (req, res) => {
       }
     }
 
-    const folderInfo = await drive.files.get({
-      fileId: customerFolderId,
-      fields: 'webViewLink',
-    });
-
     res.json({
       success: true,
-      folderLink: folderInfo.data.webViewLink,
+      folderLink: `https://drive.google.com/drive/folders/${FOLDER_ID}`,
       files: results,
     });
 
@@ -213,8 +196,3 @@ app.post('/upload-batch', async (req, res) => {
     res.status(500).json({ error: error.message || 'Batch upload failed' });
   }
 });
-
-app.listen(PORT, () => {
-  console.log(`SupaGEEK STL Upload API running on port ${PORT}`);
-});
-
