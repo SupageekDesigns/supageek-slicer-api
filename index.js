@@ -6,10 +6,14 @@ const bodyParser = require('body-parser');
 const app = express();
 const PORT = process.env.PORT || 3001;
 
+// Square credentials
+const SQUARE_ACCESS_TOKEN = process.env.SQUARE_ACCESS_TOKEN || 'EAAAl7OjpuOmqbf6DK7W74vriU1mCy77BFkHTHUlpIUDb6Sv-EmrTAEn9dhccrdu';
+const SQUARE_LOCATION_ID = process.env.SQUARE_LOCATION_ID || 'L4XZW8MM3ZF1F';
+
 // Handle preflight requests
 app.options('*', (req, res) => {
   res.header('Access-Control-Allow-Origin', '*');
-  res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, DELETE');
   res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
   res.sendStatus(200);
 });
@@ -17,7 +21,7 @@ app.options('*', (req, res) => {
 // Middleware
 app.use(cors({
   origin: '*',
-  methods: ['GET', 'POST', 'OPTIONS'],
+  methods: ['GET', 'POST', 'OPTIONS', 'DELETE'],
   allowedHeaders: ['Content-Type', 'Authorization'],
 }));
 app.use(bodyParser.json({ limit: '50mb' }));
@@ -44,7 +48,90 @@ const drive = google.drive({ version: 'v3', auth: oauth2Client });
 
 // Health check
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'SupaGEEK STL Upload API' });
+  res.json({ status: 'ok', service: 'SupaGEEK STL Upload + Checkout API' });
+});
+
+// ============================================================
+// SQUARE CHECKOUT ENDPOINT (NEW)
+// ============================================================
+app.post('/checkout', async (req, res) => {
+  try {
+    const { items } = req.body;
+
+    if (!items || items.length === 0) {
+      return res.status(400).json({ error: 'No items in cart' });
+    }
+
+    const idempotencyKey = require('crypto').randomUUID();
+
+    const lineItems = items.map((item) => ({
+      name: item.name,
+      quantity: item.quantity.toString(),
+      base_price_money: {
+        amount: item.price, // already in cents
+        currency: 'USD',
+      },
+    }));
+
+    const requestBody = {
+      idempotency_key: idempotencyKey,
+      checkout_options: {
+        allow_tipping: false,
+        ask_for_shipping_address: true,
+      },
+    };
+
+    if (items.length === 1 && items[0].quantity === 1) {
+      requestBody.quick_pay = {
+        name: items[0].name,
+        price_money: {
+          amount: items[0].price,
+          currency: 'USD',
+        },
+        location_id: SQUARE_LOCATION_ID,
+      };
+    } else {
+      requestBody.order = {
+        location_id: SQUARE_LOCATION_ID,
+        line_items: lineItems,
+      };
+    }
+
+    const response = await fetch(
+      'https://connect.squareup.com/v2/online-checkout/payment-links',
+      {
+        method: 'POST',
+        headers: {
+          'Square-Version': '2026-01-22',
+          Authorization: `Bearer ${SQUARE_ACCESS_TOKEN}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(requestBody),
+      }
+    );
+
+    const data = await response.json();
+
+    if (data.payment_link) {
+      return res.json({ checkoutUrl: data.payment_link.url });
+    }
+
+    const errorDetail =
+      data.errors?.[0]?.detail ||
+      data.errors?.[0]?.code ||
+      'Failed to create checkout';
+    const errorCategory = data.errors?.[0]?.category || 'UNKNOWN';
+
+    console.error('Square error:', JSON.stringify(data.errors));
+    return res.status(500).json({
+      error: errorDetail,
+      category: errorCategory,
+      fullError: data.errors,
+    });
+  } catch (error) {
+    console.error('Checkout error:', error);
+    return res.status(500).json({ error: error.message || 'Server error' });
+  }
 });
 
 // OAuth authorization routes
@@ -122,10 +209,7 @@ app.post('/upload', async (req, res) => {
 
     await drive.permissions.create({
       fileId: file.data.id,
-      requestBody: {
-        role: 'reader',
-        type: 'anyone',
-      },
+      requestBody: { role: 'reader', type: 'anyone' },
     });
 
     const fileInfo = await drive.files.get({
@@ -158,13 +242,11 @@ app.post('/upload-batch', async (req, res) => {
 
     const results = [];
 
-    // Create timestamp prefix for filenames
     const date = new Date();
     const dateStr = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
     const timeStr = `${String(date.getHours()).padStart(2, '0')}${String(date.getMinutes()).padStart(2, '0')}`;
     const folderName = `${dateStr}_${timeStr}_${(customerName || 'Unknown').replace(/[^a-zA-Z0-9]/g, '_')}`;
 
-    // Create folder for this batch
     let uploadFolderId = FOLDER_ID;
     try {
       const folderMetadata = {
@@ -183,24 +265,21 @@ app.post('/upload-batch', async (req, res) => {
     }
 
     for (const fileObj of files) {
-
       try {
         const { fileName, fileData } = fileObj;
         if (!fileName || !fileData) continue;
 
-        // Strip data URL prefix if present
         const base64Data = fileData.includes(',') ? fileData.split(',')[1] : fileData;
         const buffer = Buffer.from(base64Data, 'base64');
-        console.log(`Processing ${fileName}: input length ${fileData.length}, buffer size ${buffer.length}`);
-        
+        console.log(`Processing ${fileName}: buffer size ${buffer.length}`);
+
         const { Readable } = require('stream');
         const stream = Readable.from(buffer);
 
-        // Upload directly to the shared folder with prefixed filename
-      const fileMetadata = {
-  name: fileName,
-  parents: [uploadFolderId],
-};
+        const fileMetadata = {
+          name: fileName,
+          parents: [uploadFolderId],
+        };
         const media = {
           mimeType: 'application/octet-stream',
           body: stream,
@@ -216,10 +295,7 @@ app.post('/upload-batch', async (req, res) => {
 
         await drive.permissions.create({
           fileId: file.data.id,
-          requestBody: {
-            role: 'reader',
-            type: 'anyone',
-          },
+          requestBody: { role: 'reader', type: 'anyone' },
         });
 
         const fileInfo = await drive.files.get({
@@ -246,7 +322,7 @@ app.post('/upload-batch', async (req, res) => {
 
     res.json({
       success: true,
-      folderLink: `https://drive.google.com/drive/folders/${FOLDER_ID}`,
+      folderLink: `https://drive.google.com/drive/folders/${uploadFolderId}`,
       files: results,
     });
 
@@ -259,29 +335,22 @@ app.post('/upload-batch', async (req, res) => {
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Server running on port ${PORT}`);
 });
+
 // Delete folder and all files (for payment failure cleanup)
 app.delete('/cleanup/:folderId', async (req, res) => {
   try {
     const { folderId } = req.params;
-    
+
     if (!folderId) {
       return res.status(400).json({ error: 'Missing folderId' });
     }
 
-    // Delete the folder (this also deletes all files inside it)
-    await drive.files.delete({
-      fileId: folderId,
-    });
+    await drive.files.delete({ fileId: folderId });
 
-    res.json({
-      success: true,
-      message: `Folder ${folderId} deleted`,
-    });
+    res.json({ success: true, message: `Folder ${folderId} deleted` });
 
   } catch (error) {
     console.error('Cleanup error:', error);
     res.status(500).json({ error: error.message || 'Cleanup failed' });
   }
 });
-
-
