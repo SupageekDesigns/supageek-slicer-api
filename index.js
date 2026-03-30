@@ -6,9 +6,17 @@ const bodyParser = require('body-parser');
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-// Square credentials
-const SQUARE_ACCESS_TOKEN = process.env.SQUARE_ACCESS_TOKEN || 'EAAAl7OjpuOmqbf6DK7W74vriU1mCy77BFkHTHUlpIUDb6Sv-EmrTAEn9dhccrdu';
-const SQUARE_LOCATION_ID = process.env.SQUARE_LOCATION_ID || 'L4XZW8MM3ZF1F';
+// ============================================================
+// REQUIRED ENV VARS
+// ============================================================
+const SQUARE_ACCESS_TOKEN = process.env.SQUARE_ACCESS_TOKEN;
+const SQUARE_LOCATION_ID = process.env.SQUARE_LOCATION_ID;
+
+const FOLDER_ID = process.env.GOOGLE_DRIVE_FOLDER_ID;
+const OAUTH_CLIENT_ID = process.env.GOOGLE_OAUTH_CLIENT_ID;
+const OAUTH_CLIENT_SECRET = process.env.GOOGLE_OAUTH_CLIENT_SECRET;
+const OAUTH_REDIRECT_URI = process.env.GOOGLE_OAUTH_REDIRECT_URI;
+const OAUTH_REFRESH_TOKEN = process.env.GOOGLE_OAUTH_REFRESH_TOKEN;
 
 // Handle preflight requests
 app.options('*', (req, res) => {
@@ -19,21 +27,17 @@ app.options('*', (req, res) => {
 });
 
 // Middleware
-app.use(cors({
-  origin: '*',
-  methods: ['GET', 'POST', 'OPTIONS', 'DELETE'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
-}));
+app.use(
+  cors({
+    origin: '*',
+    methods: ['GET', 'POST', 'OPTIONS', 'DELETE'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
+  })
+);
 app.use(bodyParser.json({ limit: '50mb' }));
 app.use(bodyParser.urlencoded({ limit: '50mb', extended: true }));
 
 // Google OAuth setup
-const FOLDER_ID = process.env.GOOGLE_DRIVE_FOLDER_ID;
-const OAUTH_CLIENT_ID = process.env.GOOGLE_OAUTH_CLIENT_ID;
-const OAUTH_CLIENT_SECRET = process.env.GOOGLE_OAUTH_CLIENT_SECRET;
-const OAUTH_REDIRECT_URI = process.env.GOOGLE_OAUTH_REDIRECT_URI;
-const OAUTH_REFRESH_TOKEN = process.env.GOOGLE_OAUTH_REFRESH_TOKEN;
-
 const oauth2Client = new google.auth.OAuth2(
   OAUTH_CLIENT_ID,
   OAUTH_CLIENT_SECRET,
@@ -52,10 +56,40 @@ app.get('/', (req, res) => {
 });
 
 // ============================================================
-// SQUARE CHECKOUT ENDPOINT (NEW)
+// MATERIALS ENDPOINT (FIXES QUOTE PAGE 404)
+// ============================================================
+app.get('/materials', (req, res) => {
+  try {
+    // Keep this list aligned with whatever your quote UI expects.
+    // If the UI only needs strings, we can simplify later.
+    const materials = [
+      { id: 'PLA', name: 'PLA' },
+      { id: 'PETG', name: 'PETG' },
+      { id: 'ABS', name: 'ABS' },
+      { id: 'ASA', name: 'ASA' },
+      { id: 'TPU', name: 'TPU (Flexible)' },
+      { id: 'Nylon', name: 'Nylon' },
+      { id: 'CarbonFiber', name: 'Carbon Fiber' },
+    ];
+
+    res.json({ success: true, materials });
+  } catch (error) {
+    console.error('Error fetching materials:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// ============================================================
+// SQUARE CHECKOUT ENDPOINT
 // ============================================================
 app.post('/checkout', async (req, res) => {
   try {
+    if (!SQUARE_ACCESS_TOKEN || !SQUARE_LOCATION_ID) {
+      return res.status(500).json({
+        error: 'Square is not configured (missing SQUARE_ACCESS_TOKEN or SQUARE_LOCATION_ID)',
+      });
+    }
+
     const { items } = req.body;
 
     if (!items || items.length === 0) {
@@ -149,7 +183,9 @@ app.get('/oauth2callback', async (req, res) => {
   try {
     const code = req.query.code;
     const { tokens } = await oauth2Client.getToken(code);
-    res.send(`<h1>Authorization Successful!</h1><p>Refresh token (copy and save to Railway GOOGLE_OAUTH_REFRESH_TOKEN):</p><code>${tokens.refresh_token}</code>`);
+    res.send(
+      `<h1>Authorization Successful!</h1><p>Refresh token (copy and save to Railway GOOGLE_OAUTH_REFRESH_TOKEN):</p><code>${tokens.refresh_token}</code>`
+    );
   } catch (e) {
     res.status(500).send(`Auth failed: ${e.message}`);
   }
@@ -159,6 +195,16 @@ app.get('/oauth2callback', async (req, res) => {
 app.post('/upload', async (req, res) => {
   try {
     const { fileName, fileData, customerName, customerEmail } = req.body;
+
+    if (!FOLDER_ID) {
+      return res.status(500).json({ error: 'GOOGLE_DRIVE_FOLDER_ID not configured' });
+    }
+    if (!OAUTH_CLIENT_ID || !OAUTH_CLIENT_SECRET || !OAUTH_REDIRECT_URI) {
+      return res.status(500).json({ error: 'Google OAuth not configured (missing client/secret/redirect)' });
+    }
+    if (!OAUTH_REFRESH_TOKEN) {
+      return res.status(500).json({ error: 'Google OAuth not configured (missing refresh token)' });
+    }
 
     if (!fileName || !fileData) {
       return res.status(400).json({ error: 'Missing fileName or fileData' });
@@ -171,7 +217,9 @@ app.post('/upload', async (req, res) => {
     stream.push(null);
 
     const date = new Date();
-    const dateStr = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+    const dateStr = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(
+      date.getDate()
+    ).padStart(2, '0')}`;
     const timeStr = `${String(date.getHours()).padStart(2, '0')}${String(date.getMinutes()).padStart(2, '0')}`;
     const folderName = `${dateStr}_${timeStr}_${customerName || 'Unknown'}`.replace(/[^a-zA-Z0-9_@.-]/g, '_');
 
@@ -224,7 +272,6 @@ app.post('/upload', async (req, res) => {
       viewLink: fileInfo.data.webViewLink,
       downloadLink: fileInfo.data.webContentLink,
     });
-
   } catch (error) {
     console.error('Upload error:', error);
     res.status(500).json({ error: error.message || 'Upload failed' });
@@ -236,6 +283,16 @@ app.post('/upload-batch', async (req, res) => {
   try {
     const { files, customerName, customerEmail } = req.body;
 
+    if (!FOLDER_ID) {
+      return res.status(500).json({ error: 'GOOGLE_DRIVE_FOLDER_ID not configured' });
+    }
+    if (!OAUTH_CLIENT_ID || !OAUTH_CLIENT_SECRET || !OAUTH_REDIRECT_URI) {
+      return res.status(500).json({ error: 'Google OAuth not configured (missing client/secret/redirect)' });
+    }
+    if (!OAUTH_REFRESH_TOKEN) {
+      return res.status(500).json({ error: 'Google OAuth not configured (missing refresh token)' });
+    }
+
     if (!files || !Array.isArray(files) || files.length === 0) {
       return res.status(400).json({ error: 'No files provided' });
     }
@@ -243,7 +300,9 @@ app.post('/upload-batch', async (req, res) => {
     const results = [];
 
     const date = new Date();
-    const dateStr = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+    const dateStr = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(
+      date.getDate()
+    ).padStart(2, '0')}`;
     const timeStr = `${String(date.getHours()).padStart(2, '0')}${String(date.getMinutes()).padStart(2, '0')}`;
     const folderName = `${dateStr}_${timeStr}_${(customerName || 'Unknown').replace(/[^a-zA-Z0-9]/g, '_')}`;
 
@@ -309,7 +368,6 @@ app.post('/upload-batch', async (req, res) => {
           viewLink: fileInfo.data.webViewLink,
           downloadLink: fileInfo.data.webContentLink,
         });
-
       } catch (fileErr) {
         console.error('File upload error:', fileErr.message);
         results.push({
@@ -325,15 +383,10 @@ app.post('/upload-batch', async (req, res) => {
       folderLink: `https://drive.google.com/drive/folders/${uploadFolderId}`,
       files: results,
     });
-
   } catch (error) {
     console.error('Batch upload error:', error);
     res.status(500).json({ error: error.message || 'Batch upload failed' });
   }
-});
-
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`Server running on port ${PORT}`);
 });
 
 // Delete folder and all files (for payment failure cleanup)
@@ -348,9 +401,12 @@ app.delete('/cleanup/:folderId', async (req, res) => {
     await drive.files.delete({ fileId: folderId });
 
     res.json({ success: true, message: `Folder ${folderId} deleted` });
-
   } catch (error) {
     console.error('Cleanup error:', error);
     res.status(500).json({ error: error.message || 'Cleanup failed' });
   }
+});
+
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`Server running on port ${PORT}`);
 });
