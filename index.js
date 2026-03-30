@@ -79,6 +79,7 @@ app.post('/checkout', async (req, res) => {
         allow_tipping: false,
         ask_for_shipping_address: true,
       },
+      redirect_url: 'https://www.supageekdesigns.com/quote-v9/confirmation',
     };
 
     if (items.length === 1 && items[0].quantity === 1) {
@@ -332,10 +333,6 @@ app.post('/upload-batch', async (req, res) => {
   }
 });
 
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`Server running on port ${PORT}`);
-});
-
 // Delete folder and all files (for payment failure cleanup)
 app.delete('/cleanup/:folderId', async (req, res) => {
   try {
@@ -353,4 +350,8 @@ app.delete('/cleanup/:folderId', async (req, res) => {
     console.error('Cleanup error:', error);
     res.status(500).json({ error: error.message || 'Cleanup failed' });
   }
+});
+
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`Server running on port ${PORT}`);
 });
