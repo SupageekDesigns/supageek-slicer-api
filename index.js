@@ -144,7 +144,7 @@ app.post('/webhooks/square', async (req, res) => {
     const event = req.body;
     console.log('[webhook] Received event:', event.type, '| event_id:', event.event_id);
 
-    if (event.type === 'payment.completed') {
+    if (event.type === 'payment.updated' && event.data?.object?.payment?.status === 'COMPLETED') {
       const payment = event.data?.object?.payment;
       if (payment) {
         console.log('[webhook] Payment completed:', payment.id, '| amount:', payment.amount_money);
