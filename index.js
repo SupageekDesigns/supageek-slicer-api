@@ -2,6 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const { google } = require('googleapis');
 const bodyParser = require('body-parser');
+const crypto = require('crypto');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -9,6 +10,13 @@ const PORT = process.env.PORT || 3001;
 // Square credentials
 const SQUARE_ACCESS_TOKEN = process.env.SQUARE_ACCESS_TOKEN || 'EAAAl7OjpuOmqbf6DK7W74vriU1mCy77BFkHTHUlpIUDb6Sv-EmrTAEn9dhccrdu';
 const SQUARE_LOCATION_ID = process.env.SQUARE_LOCATION_ID || 'L4XZW8MM3ZF1F';
+const SQUARE_WEBHOOK_SIGNATURE_KEY = process.env.SQUARE_WEBHOOK_SIGNATURE_KEY || '';
+const WEBHOOK_NOTIFICATION_URL = 'https://supageek-slicer-api-production.up.railway.app/webhooks/square';
+
+// EmailJS config
+const EMAILJS_SERVICE_ID = 'service_imj8118';
+const EMAILJS_TEMPLATE_ID = 'template_2tk532m';
+const EMAILJS_USER_ID = 'PfVwQCZ-8trAC28Ki';
 
 // Handle preflight requests
 app.options('*', (req, res) => {
@@ -24,7 +32,12 @@ app.use(cors({
   methods: ['GET', 'POST', 'OPTIONS', 'DELETE'],
   allowedHeaders: ['Content-Type', 'Authorization'],
 }));
-app.use(bodyParser.json({ limit: '50mb' }));
+
+// Capture raw body for webhook signature verification, then parse JSON normally
+app.use(bodyParser.json({
+  limit: '50mb',
+  verify: (req, res, buf) => { req.rawBody = buf.toString('utf8'); },
+}));
 app.use(bodyParser.urlencoded({ limit: '50mb', extended: true }));
 
 // Google OAuth setup
@@ -46,29 +59,124 @@ if (OAUTH_REFRESH_TOKEN) {
 
 const drive = google.drive({ version: 'v3', auth: oauth2Client });
 
-// Health check
+// ============================================================
+// HELPERS
+// ============================================================
+
+function verifySquareWebhook(rawBody, signature, signatureKey, notificationUrl) {
+  const hmac = crypto.createHmac('sha256', signatureKey);
+  hmac.update(notificationUrl + rawBody);
+  return hmac.digest('base64') === signature;
+}
+
+async function sendPaymentConfirmedEmail(payment) {
+  const amountCents = payment.amount_money?.amount || 0;
+  const amountStr = `$${(amountCents / 100).toFixed(2)}`;
+  const paymentId = payment.id || 'Unknown';
+  const orderId = payment.order_id || 'Unknown';
+
+  let message = `SHOP PAYMENT CONFIRMED\n${'='.repeat(40)}\n\n`;
+  message += `A customer has successfully completed payment via Square.\n\n`;
+  message += `PAYMENT DETAILS\n`;
+  message += `Amount Paid: ${amountStr}\n`;
+  message += `Payment ID: ${paymentId}\n`;
+  message += `Order ID: ${orderId}\n`;
+  message += `Status: ${payment.status || 'COMPLETED'}\n`;
+  if (payment.buyer_email_address) {
+    message += `Customer Email: ${payment.buyer_email_address}\n`;
+  }
+  message += `\nView orders: https://www.supageekdesigns.com/admin/orders`;
+
+  const payload = {
+    service_id: EMAILJS_SERVICE_ID,
+    template_id: EMAILJS_TEMPLATE_ID,
+    user_id: EMAILJS_USER_ID,
+    template_params: {
+      to_email: 'sales@supageekdesigns.com',
+      from_name: 'SupaGEEK Shop',
+      from_email: 'Info@SupaGEEKDesigns.com',
+      subject: `PAYMENT CONFIRMED - ${amountStr}`,
+      message,
+      cc_email: '',
+    },
+  };
+
+  const response = await fetch('https://api.emailjs.com/api/v1.0/email/send', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+
+  console.log('[webhook] EmailJS response:', response.status);
+  return response.ok;
+}
+
+// ============================================================
+// HEALTH CHECK
+// ============================================================
 app.get('/', (req, res) => {
   res.json({ status: 'ok', service: 'SupaGEEK STL Upload + Checkout API' });
 });
 
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok' });
+});
+
 // ============================================================
-// SQUARE CHECKOUT ENDPOINT (NEW)
+// SQUARE WEBHOOK
+// ============================================================
+app.post('/webhooks/square', async (req, res) => {
+  try {
+    const signature = req.headers['x-square-hmacsha256-signature'];
+
+    if (SQUARE_WEBHOOK_SIGNATURE_KEY) {
+      if (!signature) {
+        console.warn('[webhook] Missing signature header — rejected');
+        return res.status(403).json({ error: 'Missing signature' });
+      }
+      const isValid = verifySquareWebhook(req.rawBody, signature, SQUARE_WEBHOOK_SIGNATURE_KEY, WEBHOOK_NOTIFICATION_URL);
+      if (!isValid) {
+        console.warn('[webhook] Invalid Square signature — rejected');
+        return res.status(403).json({ error: 'Invalid signature' });
+      }
+    }
+
+    const event = req.body;
+    console.log('[webhook] Received event:', event.type, '| event_id:', event.event_id);
+
+    if (event.type === 'payment.completed') {
+      const payment = event.data?.object?.payment;
+      if (payment) {
+        console.log('[webhook] Payment completed:', payment.id, '| amount:', payment.amount_money);
+        await sendPaymentConfirmedEmail(payment);
+      }
+    }
+
+    res.status(200).json({ received: true });
+  } catch (err) {
+    console.error('[webhook] Error:', err);
+    res.status(500).json({ error: 'Webhook processing failed' });
+  }
+});
+
+// ============================================================
+// SQUARE CHECKOUT
 // ============================================================
 app.post('/checkout', async (req, res) => {
   try {
-    const { items } = req.body;
+    const { items, redirect_url } = req.body;
 
     if (!items || items.length === 0) {
       return res.status(400).json({ error: 'No items in cart' });
     }
 
-    const idempotencyKey = require('crypto').randomUUID();
+    const idempotencyKey = crypto.randomUUID();
 
     const lineItems = items.map((item) => ({
       name: item.name,
       quantity: item.quantity.toString(),
       base_price_money: {
-        amount: item.price, // already in cents
+        amount: item.price,
         currency: 'USD',
       },
     }));
@@ -78,8 +186,8 @@ app.post('/checkout', async (req, res) => {
       checkout_options: {
         allow_tipping: false,
         ask_for_shipping_address: true,
+        redirect_url: redirect_url || 'https://www.supageekdesigns.com/order-confirmation',
       },
-      redirect_url: 'https://www.supageekdesigns.com/quote-v9/confirmation',
     };
 
     if (items.length === 1 && items[0].quantity === 1) {
@@ -117,32 +225,23 @@ app.post('/checkout', async (req, res) => {
       return res.json({ checkoutUrl: data.payment_link.url });
     }
 
-    const errorDetail =
-      data.errors?.[0]?.detail ||
-      data.errors?.[0]?.code ||
-      'Failed to create checkout';
+    const errorDetail = data.errors?.[0]?.detail || data.errors?.[0]?.code || 'Failed to create checkout';
     const errorCategory = data.errors?.[0]?.category || 'UNKNOWN';
 
     console.error('Square error:', JSON.stringify(data.errors));
-    return res.status(500).json({
-      error: errorDetail,
-      category: errorCategory,
-      fullError: data.errors,
-    });
+    return res.status(500).json({ error: errorDetail, category: errorCategory, fullError: data.errors });
   } catch (error) {
     console.error('Checkout error:', error);
     return res.status(500).json({ error: error.message || 'Server error' });
   }
 });
 
-// OAuth authorization routes
+// ============================================================
+// GOOGLE OAUTH
+// ============================================================
 app.get('/auth', (req, res) => {
   const scopes = ['https://www.googleapis.com/auth/drive.file'];
-  const url = oauth2Client.generateAuthUrl({
-    access_type: 'offline',
-    prompt: 'consent',
-    scope: scopes,
-  });
+  const url = oauth2Client.generateAuthUrl({ access_type: 'offline', prompt: 'consent', scope: scopes });
   res.redirect(url);
 });
 
@@ -156,7 +255,9 @@ app.get('/oauth2callback', async (req, res) => {
   }
 });
 
-// Upload STL file to Google Drive
+// ============================================================
+// UPLOAD (single file)
+// ============================================================
 app.post('/upload', async (req, res) => {
   try {
     const { fileName, fileData, customerName, customerEmail } = req.body;
@@ -183,40 +284,18 @@ app.post('/upload', async (req, res) => {
         mimeType: 'application/vnd.google-apps.folder',
         parents: [FOLDER_ID],
       };
-      const folder = await drive.files.create({
-        resource: folderMetadata,
-        fields: 'id',
-      });
+      const folder = await drive.files.create({ resource: folderMetadata, fields: 'id' });
       customerFolderId = folder.data.id;
     } catch (folderErr) {
       console.error('Folder creation error:', folderErr);
     }
 
-    const fileMetadata = {
-      name: fileName,
-      parents: [customerFolderId],
-    };
+    const fileMetadata = { name: fileName, parents: [customerFolderId] };
+    const media = { mimeType: 'application/octet-stream', body: stream };
 
-    const media = {
-      mimeType: 'application/octet-stream',
-      body: stream,
-    };
-
-    const file = await drive.files.create({
-      resource: fileMetadata,
-      media: media,
-      fields: 'id, name, webViewLink',
-    });
-
-    await drive.permissions.create({
-      fileId: file.data.id,
-      requestBody: { role: 'reader', type: 'anyone' },
-    });
-
-    const fileInfo = await drive.files.get({
-      fileId: file.data.id,
-      fields: 'webViewLink, webContentLink',
-    });
+    const file = await drive.files.create({ resource: fileMetadata, media, fields: 'id, name, webViewLink' });
+    await drive.permissions.create({ fileId: file.data.id, requestBody: { role: 'reader', type: 'anyone' } });
+    const fileInfo = await drive.files.get({ fileId: file.data.id, fields: 'webViewLink, webContentLink' });
 
     res.json({
       success: true,
@@ -225,24 +304,24 @@ app.post('/upload', async (req, res) => {
       viewLink: fileInfo.data.webViewLink,
       downloadLink: fileInfo.data.webContentLink,
     });
-
   } catch (error) {
     console.error('Upload error:', error);
     res.status(500).json({ error: error.message || 'Upload failed' });
   }
 });
 
-// Batch upload multiple files
+// ============================================================
+// UPLOAD BATCH
+// ============================================================
 app.post('/upload-batch', async (req, res) => {
   try {
-    const { files, customerName, customerEmail } = req.body;
+    const { files, customerName } = req.body;
 
     if (!files || !Array.isArray(files) || files.length === 0) {
       return res.status(400).json({ error: 'No files provided' });
     }
 
     const results = [];
-
     const date = new Date();
     const dateStr = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
     const timeStr = `${String(date.getHours()).padStart(2, '0')}${String(date.getMinutes()).padStart(2, '0')}`;
@@ -255,10 +334,7 @@ app.post('/upload-batch', async (req, res) => {
         mimeType: 'application/vnd.google-apps.folder',
         parents: [FOLDER_ID],
       };
-      const folder = await drive.files.create({
-        resource: folderMetadata,
-        fields: 'id',
-      });
+      const folder = await drive.files.create({ resource: folderMetadata, fields: 'id' });
       uploadFolderId = folder.data.id;
       console.log(`Created folder: ${folderName} (${uploadFolderId})`);
     } catch (folderErr) {
@@ -277,32 +353,14 @@ app.post('/upload-batch', async (req, res) => {
         const { Readable } = require('stream');
         const stream = Readable.from(buffer);
 
-        const fileMetadata = {
-          name: fileName,
-          parents: [uploadFolderId],
-        };
-        const media = {
-          mimeType: 'application/octet-stream',
-          body: stream,
-        };
+        const fileMetadata = { name: fileName, parents: [uploadFolderId] };
+        const media = { mimeType: 'application/octet-stream', body: stream };
 
-        const file = await drive.files.create({
-          resource: fileMetadata,
-          media: media,
-          fields: 'id, name, webViewLink',
-        });
-
+        const file = await drive.files.create({ resource: fileMetadata, media, fields: 'id, name, webViewLink' });
         console.log(`File created: ${file.data.id}`);
 
-        await drive.permissions.create({
-          fileId: file.data.id,
-          requestBody: { role: 'reader', type: 'anyone' },
-        });
-
-        const fileInfo = await drive.files.get({
-          fileId: file.data.id,
-          fields: 'webViewLink, webContentLink',
-        });
+        await drive.permissions.create({ fileId: file.data.id, requestBody: { role: 'reader', type: 'anyone' } });
+        const fileInfo = await drive.files.get({ fileId: file.data.id, fields: 'webViewLink, webContentLink' });
 
         results.push({
           success: true,
@@ -310,14 +368,9 @@ app.post('/upload-batch', async (req, res) => {
           viewLink: fileInfo.data.webViewLink,
           downloadLink: fileInfo.data.webContentLink,
         });
-
       } catch (fileErr) {
         console.error('File upload error:', fileErr.message);
-        results.push({
-          success: false,
-          fileName: fileObj.fileName,
-          error: fileErr.message,
-        });
+        results.push({ success: false, fileName: fileObj.fileName, error: fileErr.message });
       }
     }
 
@@ -326,26 +379,21 @@ app.post('/upload-batch', async (req, res) => {
       folderLink: `https://drive.google.com/drive/folders/${uploadFolderId}`,
       files: results,
     });
-
   } catch (error) {
     console.error('Batch upload error:', error);
     res.status(500).json({ error: error.message || 'Batch upload failed' });
   }
 });
 
-// Delete folder and all files (for payment failure cleanup)
+// ============================================================
+// CLEANUP
+// ============================================================
 app.delete('/cleanup/:folderId', async (req, res) => {
   try {
     const { folderId } = req.params;
-
-    if (!folderId) {
-      return res.status(400).json({ error: 'Missing folderId' });
-    }
-
+    if (!folderId) return res.status(400).json({ error: 'Missing folderId' });
     await drive.files.delete({ fileId: folderId });
-
     res.json({ success: true, message: `Folder ${folderId} deleted` });
-
   } catch (error) {
     console.error('Cleanup error:', error);
     res.status(500).json({ error: error.message || 'Cleanup failed' });
