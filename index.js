@@ -3,6 +3,7 @@ const cors = require('cors');
 const { google } = require('googleapis');
 const bodyParser = require('body-parser');
 const crypto = require('crypto');
+const nodemailer = require('nodemailer');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -12,11 +13,6 @@ const SQUARE_ACCESS_TOKEN = process.env.SQUARE_ACCESS_TOKEN || 'EAAAl7OjpuOmqbf6
 const SQUARE_LOCATION_ID = process.env.SQUARE_LOCATION_ID || 'L4XZW8MM3ZF1F';
 const SQUARE_WEBHOOK_SIGNATURE_KEY = process.env.SQUARE_WEBHOOK_SIGNATURE_KEY || '';
 const WEBHOOK_NOTIFICATION_URL = 'https://supageek-slicer-api-production.up.railway.app/webhooks/square';
-
-// EmailJS config
-const EMAILJS_SERVICE_ID = 'service_imj8118';
-const EMAILJS_TEMPLATE_ID = 'template_2tk532m';
-const EMAILJS_USER_ID = 'PfVwQCZ-8trAC28Ki';
 
 // Handle preflight requests
 app.options('*', (req, res) => {
@@ -87,28 +83,23 @@ async function sendPaymentConfirmedEmail(payment) {
   }
   message += `\nView orders: https://www.supageekdesigns.com/admin/orders`;
 
-  const payload = {
-    service_id: EMAILJS_SERVICE_ID,
-    template_id: EMAILJS_TEMPLATE_ID,
-    user_id: EMAILJS_USER_ID,
-    template_params: {
-      to_email: 'sales@supageekdesigns.com',
-      from_name: 'SupaGEEK Shop',
-      from_email: 'Info@SupaGEEKDesigns.com',
-      subject: `PAYMENT CONFIRMED - ${amountStr}`,
-      message,
-      cc_email: '',
+  const transporter = nodemailer.createTransport({
+    service: 'gmail',
+    auth: {
+      user: process.env.GMAIL_USER,
+      pass: process.env.GMAIL_APP_PASSWORD,
     },
-  };
-
-  const response = await fetch('https://api.emailjs.com/api/v1.0/email/send', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
   });
 
-  console.log('[webhook] EmailJS response:', response.status);
-  return response.ok;
+  await transporter.sendMail({
+    from: `"SupaGEEK Shop" <${process.env.GMAIL_USER}>`,
+    to: 'sales@supageekdesigns.com',
+    subject: `PAYMENT CONFIRMED - ${amountStr}`,
+    text: message,
+  });
+
+  console.log('[webhook] Email sent via nodemailer');
+  return true;
 }
 
 // ============================================================
@@ -145,11 +136,9 @@ app.post('/webhooks/square', async (req, res) => {
     console.log('[webhook] Received event:', event.type, '| event_id:', event.event_id);
 
     if (event.type === 'payment.updated' && event.data?.object?.payment?.status === 'COMPLETED') {
-      const payment = event.data?.object?.payment;
-      if (payment) {
-        console.log('[webhook] Payment completed:', payment.id, '| amount:', payment.amount_money);
-        await sendPaymentConfirmedEmail(payment);
-      }
+      const payment = event.data.object.payment;
+      console.log('[webhook] Payment completed:', payment.id, '| amount:', payment.amount_money);
+      await sendPaymentConfirmedEmail(payment);
     }
 
     res.status(200).json({ received: true });
@@ -260,7 +249,7 @@ app.get('/oauth2callback', async (req, res) => {
 // ============================================================
 app.post('/upload', async (req, res) => {
   try {
-    const { fileName, fileData, customerName, customerEmail } = req.body;
+    const { fileName, fileData, customerName } = req.body;
 
     if (!fileName || !fileData) {
       return res.status(400).json({ error: 'Missing fileName or fileData' });
