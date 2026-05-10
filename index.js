@@ -170,12 +170,12 @@ app.post('/checkout', async (req, res) => {
       },
     }));
 
-    const requestBody = {
-      idempotency_key: idempotencyKey,
-      checkout_options: {
-        allow_tipping: false,
-        ask_for_shipping_address: true,
-        redirect_url: redirect_url || 'https://www.supageekdesigns.com/order-confirmation',
+const requestBody = {
+  idempotency_key: idempotencyKey,
+  checkout_options: {
+    allow_tipping: false,
+    ask_for_shipping_address: req.body.ask_for_shipping_address !== false,
+    redirect_url: redirect_url || 'https://www.supageekdesigns.com/order-confirmation',
       },
     };
 
